@@ -106,65 +106,50 @@ namespace FastModAudioLoad
 		DeepProfiler.Start(string.Concat("Loading assets of type ", typeof(AudioClip), " for mod ", mod));
 		Dictionary<string, FileInfo> allFilesForMod = ModContentPack.GetAllFilesForMod(mod, GenFilePaths.ContentPath<AudioClip>(),
 		    ModContentLoader<AudioClip>.IsAcceptableExtension);
+		List<(string, FileInfo, UnityWebRequest)> requests = [];
 		foreach (KeyValuePair<string, FileInfo> item in allFilesForMod)
 		{
-			LoadedContentItem<AudioClip> loadedContentItem = LoadItem((FilesystemFile)item.Value);
+			UnityWebRequest request = startLoadItem((FilesystemFile)item.Value);
+			if(request != null)
+			    requests.Add((item.Key, item.Value, request));
+		}
+		foreach ((string, FileInfo, UnityWebRequest) item in requests)
+		{
+			while(!item.Item3.isDone)
+				Thread.Sleep(1);
+			LoadedContentItem<AudioClip> loadedContentItem = finishLoadItem((FilesystemFile)item.Item2,item.Item3);
 			if (loadedContentItem != null)
-			{
-				yield return new Pair<string, LoadedContentItem<AudioClip>>(item.Key, loadedContentItem);
-			}
+				yield return new Pair<string, LoadedContentItem<AudioClip>>(item.Item1, loadedContentItem);
 		}
 		DeepProfiler.End();
 	}
 
-        // And this is finally ModContentLoader<T>.LoadItem(), with modifications and the download code modified (#if #else).
-        public static LoadedContentItem<AudioClip> LoadItem(VirtualFile file)
+        public static UnityWebRequest startLoadItem(VirtualFile file)
+        {
+		string uri = GenFilePaths.SafeURIForUnityWWWFromPath(file.FullPath);
+		UnityWebRequest unityWebRequest = UnityWebRequestMultimedia.GetAudioClip(uri, GetAudioTypeFromURI(uri));
+		((DownloadHandlerAudioClip)unityWebRequest.downloadHandler).streamAudio = ShouldStreamAudioClipFromFile(file);
+		unityWebRequest.SendWebRequest();
+		return unityWebRequest;
+	}
+
+        public static LoadedContentItem<AudioClip> finishLoadItem(VirtualFile file, UnityWebRequest unityWebRequest)
         {
 		try
 		{
+			if (unityWebRequest.error != null)
 			{
-				IDisposable extraDisposable = null;
-				string uri = GenFilePaths.SafeURIForUnityWWWFromPath(file.FullPath);
-				AudioClip val;
-#if false
-				using (UnityWebRequest unityWebRequest = UnityWebRequestMultimedia.GetAudioClip(uri, GetAudioTypeFromURI(uri)))
-				{
-					unityWebRequest.SendWebRequest();
-					while (!unityWebRequest.isDone)
-					{
-						Thread.Sleep(1);
-					}
-					if (unityWebRequest.error != null)
-					{
-						throw new InvalidOperationException(unityWebRequest.error);
-					}
-					val = DownloadHandlerAudioClip.GetContent(unityWebRequest);
-				}
-#else
-				var audioHandler = new DownloadHandlerAudioClip(uri, GetAudioTypeFromURI(uri));
-				// This is the core of the change. Switch to streamed audio if file is large.
-				audioHandler.streamAudio = ShouldStreamAudioClipFromFile(file);
-				using (UnityWebRequest unityWebRequest = new UnityWebRequest(uri, UnityWebRequest.kHttpVerbGET, audioHandler, null))
-				{
-					unityWebRequest.SendWebRequest();
-					while (!unityWebRequest.isDone)
-					{
-						Thread.Sleep(1);
-					}
-					if (unityWebRequest.error != null)
-					{
-						throw new InvalidOperationException(unityWebRequest.error);
-					}
-					val = audioHandler.audioClip;
-				}
-#endif
-				UnityEngine.Object @object = val as UnityEngine.Object;
-				if (@object != null)
-				{
-					@object.name = Path.GetFileNameWithoutExtension(file.Name);
-				}
-				return new LoadedContentItem<AudioClip>(file, val, extraDisposable);
+				Log.Error(string.Concat("Exception loading ", typeof(AudioClip), " from file.\nabsFilePath: ", file.FullPath, "\nException: ", unityWebRequest.error));
+				return null;
 			}
+			AudioClip val = DownloadHandlerAudioClip.GetContent(unityWebRequest);
+			UnityEngine.Object @object = val as UnityEngine.Object;
+			if (@object != null)
+			{
+				@object.name = Path.GetFileNameWithoutExtension(file.Name);
+			}
+			IDisposable extraDisposable = null;
+			return new LoadedContentItem<AudioClip>(file, val, extraDisposable);
 		}
 		catch (Exception ex)
 		{
